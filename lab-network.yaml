@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Network Template: Sample template that creates a VPC with DNS and public IPs enabled.
+
+# This template creates:
+#   VPC
+#   Internet Gateway
+#   Public Route Table
+#   Public Subnet
+
+Parameters:
+
+  NetworkStackName:
+    Description: >-
+      Name of an active CloudFormation stack that contains the networking
+      resources, such as the VPC and subnet that will be used in this stack.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: '^[a-zA-Z][-a-zA-Z0-9]*$'
+    Default: lab-network
+
+  AmazonLinuxAMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn-ami-hvm-x86_64-gp2
+    
+######################
+# Resources section
+######################
+
+Resources:
+
+  ## VPC
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: 10.0.0.0/16
+      
+  ## Internet Gateway
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  
+  ## Public Route Table
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  
+  ## Public Subnet
+  
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: us-east-1a      
+  
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+  
+  PublicSubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      NetworkAclId: !GetAtt 
+        - VPC
+        - DefaultNetworkAcl
+  
+  DataScienceServerInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          All:
+            - ConfigureSampleApp
+        ConfigureSampleApp:
+          packages:
+            yum:
+              httpd: []
+          files:
+            /var/www/html/index.html:
+              content: |
+                <img src="https://s3.amazonaws.com/cloudformation-examples/cloudformation_graphic.png" alt="AWS CloudFormation Logo"/>
+                <h1>The AWS .</h1>
+              mode: 000644
+              owner: apache
+              group: apache
+          services:
+            sysvinit:
+              httpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref AmazonLinuxAMIID
+      AvailabilityZone: us-east-1a
+      KeyName: data_science_student_login
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref DataScienceServerSecurityGroup
+          AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnet
+          
+      Tags:
+        - Key: Name
+          Value: Data Science Server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y aws-cfn-bootstrap
+          # Install the files and packages from the metadata
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource DataScienceServerInstance --configsets All --region ${AWS::Region}
+          # Signal the status from cfn-init
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource DataScienceServerInstance --region ${AWS::Region}
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+
+  DiskVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: 100
+      AvailabilityZone: !GetAtt DataScienceServerInstance.AvailabilityZone
+      Tags:
+        - Key: Name
+          Value: Web Data
+    DeletionPolicy: Snapshot
+
+  DiskMountPoint:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref DataScienceServerInstance
+      VolumeId: !Ref DiskVolume
+      Device: /dev/sdh
+
+  DataScienceServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP and SSH ingress
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Data Science Server Security Group 
+
+               
+  
+ 
+######################
+# Outputs section
+######################
+
+Outputs:
+
+  InstanceIP:
+    Description: URL of the sample website
+    Value: !Sub '${DataScienceServerInstance.PublicDnsName}'
+
+
